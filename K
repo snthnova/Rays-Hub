@@ -1,0 +1,272 @@
+task.spawn(function()
+
+    -- =========================
+    -- CORE SYSTEM
+    -- =========================
+
+    local load = require(game.ReplicatedStorage:WaitForChild("Fsys")).load
+
+    set_thread_identity(2)
+    local ClientData = load("ClientData")
+    local KindDB = load("KindDB")
+    local RouterClient = load("RouterClient")
+    local DownloadClient = load("DownloadClient")
+    local AnimationManager = load("AnimationManager")
+    local PetRigs = load("new:PetRigs")
+    set_thread_identity(8)
+
+    local HttpService = game:GetService("HttpService")
+    local Player = game.Players.LocalPlayer
+
+    local PetModels = {}
+    local SpawnedPets = {}
+    local EquippedPet = nil
+    local MountedPet = nil
+    local MountTrack = nil
+
+    -- =========================
+    -- DATA HELPERS
+    -- =========================
+
+    local function Predict(key, callback)
+        local data = ClientData.get(key)
+        ClientData.predict(key, callback(table.clone(data)))
+    end
+
+    local function GUID()
+        return HttpService:GenerateGUID(false)
+    end
+
+    local function GetPetModel(kind)
+        if PetModels[kind] then
+            return PetModels[kind]
+        end
+        local model = DownloadClient.promise_download_copy("Pets", kind):expect()
+        PetModels[kind] = model
+        return model
+    end
+
+    -- =========================
+    -- PET CREATION
+    -- =========================
+
+    local function CreatePet(id, props)
+        local uid = GUID()
+        local item = KindDB[id]
+        if not item then return end
+
+        set_thread_identity(2)
+        Predict("inventory", function(inv)
+            inv.pets[uid] = {
+                unique = uid,
+                category = "pets",
+                id = id,
+                kind = item.kind,
+                newness_order = math.random(1, 999999),
+                properties = props or {}
+            }
+            return inv
+        end)
+        set_thread_identity(8)
+
+        SpawnedPets[uid] = { data = ClientData.get("inventory").pets[uid], model = nil }
+        return uid
+    end
+
+    local function ApplyNeon(model, entry)
+        local petModel = model:FindFirstChild("PetModel")
+        if not petModel then return end
+        for part, cfg in pairs(entry.neon_parts or {}) do
+            local geo = PetRigs.get(petModel).get_geo_part(petModel, part)
+            geo.Material = cfg.Material
+            geo.Color = cfg.Color
+        end
+    end
+
+    -- =========================
+    -- EQUIP / UNEQUIP
+    -- =========================
+
+    local function EquipPet(pet)
+        if EquippedPet then
+            EquippedPet.model:Destroy()
+        end
+
+        local model = GetPetModel(pet.data.kind):Clone()
+        model.Parent = workspace
+        pet.model = model
+
+        if pet.data.properties.neon or pet.data.properties.mega_neon then
+            ApplyNeon(model, KindDB[pet.data.kind])
+        end
+
+        Predict("pet_char_wrappers", function(w)
+            w[#w+1] = {
+                char = model,
+                pet_unique = pet.data.unique,
+                pet_id = pet.data.id,
+                player = Player,
+                is_pet = true
+            }
+            return w
+        end)
+
+        Predict("pet_state_managers", function(s)
+            s[#s+1] = {
+                char = model,
+                player = Player,
+                states = {}
+            }
+            return s
+        end)
+
+        EquippedPet = pet
+    end
+
+    -- =========================
+    -- RIDE / FLY
+    -- =========================
+
+    local function ClearMount()
+        if MountTrack then
+            MountTrack:Stop()
+            MountTrack:Destroy()
+        end
+        MountedPet = nil
+        Predict("state_manager", function(s)
+            s.states = {}
+            s.is_sitting = false
+            return s
+        end)
+    end
+
+    local function MountPet(uid, playerState, petState)
+        local pet = SpawnedPets[uid]
+        if not pet or not pet.model then return end
+
+        MountedPet = uid
+
+        Predict("pet_state_managers", function(s)
+            for _, v in pairs(s) do
+                if v.char == pet.model then
+                    v.states = {{id = petState}}
+                end
+            end
+            return s
+        end)
+
+        Predict("state_manager", function(s)
+            s.states = {{id = playerState}}
+            s.is_sitting = true
+            return s
+        end)
+
+        pet.model:ScaleTo(2)
+
+        MountTrack =
+            Player.Character.Humanoid.Animator:LoadAnimation(
+                AnimationManager.get_track("PlayerRidingPet")
+            )
+        Player.Character.Humanoid.Sit = true
+        MountTrack:Play()
+    end
+
+    -- =========================
+    -- ROUTER HOOK
+    -- =========================
+
+    local oldGet = RouterClient.get
+    RouterClient.get = function(name)
+        return oldGet(name)
+    end
+
+    -- =========================
+    -- INVENTORY DB
+    -- =========================
+
+    local InventoryDB = load("InventoryDB")
+
+    function GetPetByName(name)
+        for _, v in pairs(InventoryDB.pets) do
+            if v.name:lower() == name:lower() then
+                return v.id
+            end
+        end
+        return nil
+    end
+
+    -- =========================
+    -- YOUR GUI (UNCHANGED)
+    -- =========================
+
+    local WindUI = loadstring(game:HttpGet(
+        "https://github.com/Footagesus/WindUI/releases/latest/download/main.lua"
+    ))()
+
+    local Confirmed = false
+
+    WindUI:Popup({
+        Title = "SNTHNOVA HUB",
+        Buttons = {
+            {Title = "Cancel"},
+            {Title = "Continue", Callback = function() Confirmed = true end}
+        }
+    })
+
+    repeat task.wait() until Confirmed
+
+    local Window = WindUI:CreateWindow({
+        Title = "SNTHNOVA HUB",
+        Size = UDim2.fromOffset(420, 350),
+        Theme = "Dark"
+    })
+
+    local PetsTab = Window:Tab({
+        Title = "Pets",
+        Icon = "heart"
+    })
+
+    local PetName = ""
+    local PetType = "FR"
+
+    PetsTab:Input({
+        Title = "Pet Name",
+        Placeholder = "Frost Dragon",
+        Callback = function(v)
+            PetName = v
+        end
+    })
+
+    PetsTab:Dropdown({
+        Title = "Pet Type",
+        Values = {"FR", "F", "R", "N"},
+        Callback = function(v)
+            PetType = v
+        end
+    })
+
+    PetsTab:Button({
+        Title = "Spawn Pet",
+        Callback = function()
+            local id = GetPetByName(PetName)
+            if not id then return end
+
+            local props = {
+                flyable = PetType == "FR" or PetType == "F",
+                rideable = PetType == "FR" or PetType == "R",
+                neon = PetType == "N"
+            }
+
+            local uid = CreatePet(id, props)
+            local pet = SpawnedPets[uid]
+            EquipPet(pet)
+
+            if props.flyable then
+                MountPet(uid, "PlayerFlyingPet", "PetBeingFlown")
+            elseif props.rideable then
+                MountPet(uid, "PlayerRidingPet", "PetBeingRidden")
+            end
+        end
+    })
+
+end)
