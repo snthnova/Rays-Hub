@@ -6,30 +6,24 @@ task.spawn(function()
     local load = require(game.ReplicatedStorage:WaitForChild("Fsys")).load
     set_thread_identity(2)
 
-    local ClientData = load("ClientData")
-    local ItemsDB = load("KindDB")
-    local Router = load("RouterClient")
-    local Downloader = load("DownloadClient")
-    local Animations = load("AnimationManager")
-    local PetRigs = load("new:PetRigs")
-    local InventoryDB = load("InventoryDB")
+    local ClientData   = load("ClientData")
+    local ItemsDB      = load("KindDB")
+    local InventoryDB  = load("InventoryDB")
 
     set_thread_identity(8)
 
     -- =========================
-    -- INTERNAL STATE
+    -- SERVICES
     -- =========================
-    local Pets = {}
-    local PetModels = {}
-    local MountedPet = nil
-    local MountTrack = nil
+    local Players = game:GetService("Players")
+    local HttpService = game:GetService("HttpService")
+    local UserInputService = game:GetService("UserInputService")
+
+    local Player = Players.LocalPlayer
 
     -- =========================
     -- HELPERS
     -- =========================
-    local HttpService = game:GetService("HttpService")
-    local Player = game.Players.LocalPlayer
-
     local function UID()
         return HttpService:GenerateGUID(false)
     end
@@ -40,26 +34,18 @@ task.spawn(function()
         ClientData.predict(key, fn(clone))
     end
 
-    local function GetPetModel(kind)
-        if PetModels[kind] then return PetModels[kind] end
-        local m = Downloader.promise_download_copy("Pets", kind):expect()
-        PetModels[kind] = m
-        return m
-    end
-
     -- =========================
-    -- PET CREATION
+    -- PET SPAWN
     -- =========================
     function vu83(petId, props)
         local unique = UID()
-        local petData
 
         set_thread_identity(2)
         UpdateData("inventory", function(inv)
             local pets = table.clone(inv.pets)
             local item = ItemsDB[petId]
 
-            petData = {
+            pets[unique] = {
                 unique = unique,
                 id = petId,
                 kind = item.kind,
@@ -68,35 +54,10 @@ task.spawn(function()
                 properties = props or {}
             }
 
-            pets[unique] = petData
             inv.pets = pets
             return inv
         end)
         set_thread_identity(8)
-
-        Pets[unique] = { data = petData }
-        return petData
-    end
-
-    -- =========================
-    -- FIND BY NAME
-    -- =========================
-    function GetPetByName(name)
-        for _, v in pairs(InventoryDB.pets) do
-            if v.name:lower() == name:lower() then
-                return v.id
-            end
-        end
-        return nil
-    end
-
-    function GetToyByName(name)
-        for _, v in pairs(InventoryDB.toys) do
-            if v.name:lower() == name:lower() then
-                return v.id
-            end
-        end
-        return nil
     end
 
     -- =========================
@@ -115,6 +76,25 @@ task.spawn(function()
     end
 
     -- =========================
+    -- FIND BY NAME
+    -- =========================
+    function GetPetByName(name)
+        for _, v in pairs(InventoryDB.pets) do
+            if v.name:lower() == name:lower() then
+                return v.id
+            end
+        end
+    end
+
+    function GetToyByName(name)
+        for _, v in pairs(InventoryDB.toys) do
+            if v.name:lower() == name:lower() then
+                return v.id
+            end
+        end
+    end
+
+    -- =========================
     -- GUI
     -- =========================
     local Gui = Instance.new("ScreenGui")
@@ -122,12 +102,55 @@ task.spawn(function()
     Gui.Parent = Player:WaitForChild("PlayerGui")
 
     local Main = Instance.new("Frame", Gui)
-    Main.Size = UDim2.fromOffset(420, 420)
+    Main.Size = UDim2.fromOffset(420, 430)
     Main.Position = UDim2.fromScale(0.5, 0.5)
     Main.AnchorPoint = Vector2.new(0.5, 0.5)
     Main.BackgroundColor3 = Color3.fromRGB(25,25,25)
-    Instance.new("UICorner", Main).CornerRadius = UDim.new(0, 12)
+    Instance.new("UICorner", Main).CornerRadius = UDim.new(0,12)
 
+    -- =========================
+    -- DRAG (PC + MOBILE)
+    -- =========================
+    local dragging = false
+    local dragStart, startPos
+
+    local function updateDrag(input)
+        local delta = input.Position - dragStart
+        Main.Position = UDim2.new(
+            startPos.X.Scale,
+            startPos.X.Offset + delta.X,
+            startPos.Y.Scale,
+            startPos.Y.Offset + delta.Y
+        )
+    end
+
+    Main.InputBegan:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1
+        or input.UserInputType == Enum.UserInputType.Touch then
+            dragging = true
+            dragStart = input.Position
+            startPos = Main.Position
+
+            input.Changed:Connect(function()
+                if input.UserInputState == Enum.UserInputState.End then
+                    dragging = false
+                end
+            end)
+        end
+    end)
+
+    Main.InputChanged:Connect(function(input)
+        if dragging and (
+            input.UserInputType == Enum.UserInputType.MouseMovement
+            or input.UserInputType == Enum.UserInputType.Touch
+        ) then
+            updateDrag(input)
+        end
+    end)
+
+    -- =========================
+    -- TITLE
+    -- =========================
     local Title = Instance.new("TextLabel", Main)
     Title.Size = UDim2.new(1, -20, 0, 40)
     Title.Position = UDim2.fromOffset(10, 10)
@@ -139,19 +162,19 @@ task.spawn(function()
     Title.TextXAlignment = Left
 
     -- =========================
-    -- PET SECTION
+    -- PET NAME
     -- =========================
     local PetBox = Instance.new("TextBox", Main)
     PetBox.Size = UDim2.new(1, -40, 0, 36)
     PetBox.Position = UDim2.fromOffset(20, 60)
     PetBox.PlaceholderText = "Pet Name (e.g. Frost Dragon)"
     PetBox.Text = ""
-    PetBox.BackgroundColor3 = Color3.fromRGB(35,35,35)
     PetBox.TextColor3 = Color3.new(1,1,1)
+    PetBox.BackgroundColor3 = Color3.fromRGB(35,35,35)
     Instance.new("UICorner", PetBox).CornerRadius = UDim.new(0,8)
 
     -- =========================
-    -- PET MODE (OLD STYLE)
+    -- PET MODE (NORMAL / FR / NFR / MFR)
     -- =========================
     local PetMode = "NORMAL"
     local ModeButtons = {}
@@ -166,9 +189,9 @@ task.spawn(function()
         end
     end
 
-    local function ModeBtn(text, mode, x)
+    local function ModeButton(text, mode, x)
         local b = Instance.new("TextButton", Main)
-        b.Size = UDim2.fromOffset(90,32)
+        b.Size = UDim2.fromOffset(90, 32)
         b.Position = UDim2.fromOffset(x, 110)
         b.Text = text
         b.Font = Enum.Font.GothamBold
@@ -184,12 +207,12 @@ task.spawn(function()
         ModeButtons[mode] = b
     end
 
-    ModeBtn("FR",  "FR",  20)
-    ModeBtn("NFR", "NFR", 130)
-    ModeBtn("MFR", "MFR", 240)
+    ModeButton("FR",  "FR",  20)
+    ModeButton("NFR", "NFR", 130)
+    ModeButton("MFR", "MFR", 240)
 
     -- =========================
-    -- SPAWN PET
+    -- BUILD PROPS
     -- =========================
     local function BuildProps()
         local p = { age = math.random(1,900000) }
@@ -210,6 +233,9 @@ task.spawn(function()
         return p
     end
 
+    -- =========================
+    -- SPAWN PET
+    -- =========================
     local SpawnPet = Instance.new("TextButton", Main)
     SpawnPet.Size = UDim2.new(1, -40, 0, 40)
     SpawnPet.Position = UDim2.fromOffset(20, 160)
@@ -245,15 +271,15 @@ task.spawn(function()
     end)
 
     -- =========================
-    -- TOYS SECTION
+    -- TOYS
     -- =========================
     local ToyBox = Instance.new("TextBox", Main)
     ToyBox.Size = UDim2.new(1, -40, 0, 36)
     ToyBox.Position = UDim2.fromOffset(20, 270)
     ToyBox.PlaceholderText = "Toy Name (e.g. Grappling Hook)"
     ToyBox.Text = ""
-    ToyBox.BackgroundColor3 = Color3.fromRGB(35,35,35)
     ToyBox.TextColor3 = Color3.new(1,1,1)
+    ToyBox.BackgroundColor3 = Color3.fromRGB(35,35,35)
     Instance.new("UICorner", ToyBox).CornerRadius = UDim.new(0,8)
 
     local SpawnToyBtn = Instance.new("TextButton", Main)
