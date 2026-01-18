@@ -1,191 +1,86 @@
 task.spawn(function()
 
     -- =========================
-    -- CORE SYSTEM
+    -- CORE LOADS
     -- =========================
-
     local load = require(game.ReplicatedStorage:WaitForChild("Fsys")).load
-
     set_thread_identity(2)
+
     local ClientData = load("ClientData")
-    local KindDB = load("KindDB")
-    local RouterClient = load("RouterClient")
-    local DownloadClient = load("DownloadClient")
-    local AnimationManager = load("AnimationManager")
+    local ItemsDB = load("KindDB")
+    local Router = load("RouterClient")
+    local Downloader = load("DownloadClient")
+    local Animations = load("AnimationManager")
     local PetRigs = load("new:PetRigs")
+    local InventoryDB = load("InventoryDB")
+
     set_thread_identity(8)
 
-    local HttpService = game:GetService("HttpService")
-    local Player = game.Players.LocalPlayer
-
+    -- =========================
+    -- INTERNAL STATE
+    -- =========================
+    local Pets = {}
     local PetModels = {}
-    local SpawnedPets = {}
-    local EquippedPet = nil
     local MountedPet = nil
     local MountTrack = nil
 
     -- =========================
-    -- DATA HELPERS
+    -- HELPERS
     -- =========================
+    local HttpService = game:GetService("HttpService")
+    local Player = game.Players.LocalPlayer
 
-    local function Predict(key, callback)
-        local data = ClientData.get(key)
-        ClientData.predict(key, callback(table.clone(data)))
-    end
-
-    local function GUID()
+    local function UID()
         return HttpService:GenerateGUID(false)
     end
 
+    local function UpdateData(key, fn)
+        local data = ClientData.get(key)
+        local clone = table.clone(data)
+        ClientData.predict(key, fn(clone))
+    end
+
     local function GetPetModel(kind)
-        if PetModels[kind] then
-            return PetModels[kind]
-        end
-        local model = DownloadClient.promise_download_copy("Pets", kind):expect()
-        PetModels[kind] = model
-        return model
+        if PetModels[kind] then return PetModels[kind] end
+        local m = Downloader.promise_download_copy("Pets", kind):expect()
+        PetModels[kind] = m
+        return m
     end
 
     -- =========================
     -- PET CREATION
     -- =========================
-
-    local function CreatePet(id, props)
-        local uid = GUID()
-        local item = KindDB[id]
-        if not item then return end
+    function vu83(petId, props)
+        local unique = UID()
+        local petData
 
         set_thread_identity(2)
-        Predict("inventory", function(inv)
-            inv.pets[uid] = {
-                unique = uid,
-                category = "pets",
-                id = id,
+        UpdateData("inventory", function(inv)
+            local pets = table.clone(inv.pets)
+            local item = ItemsDB[petId]
+
+            petData = {
+                unique = unique,
+                id = petId,
                 kind = item.kind,
-                newness_order = math.random(1, 999999),
+                category = "pets",
+                newness_order = 0,
                 properties = props or {}
             }
+
+            pets[unique] = petData
+            inv.pets = pets
             return inv
         end)
         set_thread_identity(8)
 
-        SpawnedPets[uid] = { data = ClientData.get("inventory").pets[uid], model = nil }
-        return uid
-    end
-
-    local function ApplyNeon(model, entry)
-        local petModel = model:FindFirstChild("PetModel")
-        if not petModel then return end
-        for part, cfg in pairs(entry.neon_parts or {}) do
-            local geo = PetRigs.get(petModel).get_geo_part(petModel, part)
-            geo.Material = cfg.Material
-            geo.Color = cfg.Color
-        end
+        Pets[unique] = { data = petData }
+        return petData
     end
 
     -- =========================
-    -- EQUIP / UNEQUIP
+    -- FIND BY NAME
     -- =========================
-
-    local function EquipPet(pet)
-        if EquippedPet then
-            EquippedPet.model:Destroy()
-        end
-
-        local model = GetPetModel(pet.data.kind):Clone()
-        model.Parent = workspace
-        pet.model = model
-
-        if pet.data.properties.neon or pet.data.properties.mega_neon then
-            ApplyNeon(model, KindDB[pet.data.kind])
-        end
-
-        Predict("pet_char_wrappers", function(w)
-            w[#w+1] = {
-                char = model,
-                pet_unique = pet.data.unique,
-                pet_id = pet.data.id,
-                player = Player,
-                is_pet = true
-            }
-            return w
-        end)
-
-        Predict("pet_state_managers", function(s)
-            s[#s+1] = {
-                char = model,
-                player = Player,
-                states = {}
-            }
-            return s
-        end)
-
-        EquippedPet = pet
-    end
-
-    -- =========================
-    -- RIDE / FLY
-    -- =========================
-
-    local function ClearMount()
-        if MountTrack then
-            MountTrack:Stop()
-            MountTrack:Destroy()
-        end
-        MountedPet = nil
-        Predict("state_manager", function(s)
-            s.states = {}
-            s.is_sitting = false
-            return s
-        end)
-    end
-
-    local function MountPet(uid, playerState, petState)
-        local pet = SpawnedPets[uid]
-        if not pet or not pet.model then return end
-
-        MountedPet = uid
-
-        Predict("pet_state_managers", function(s)
-            for _, v in pairs(s) do
-                if v.char == pet.model then
-                    v.states = {{id = petState}}
-                end
-            end
-            return s
-        end)
-
-        Predict("state_manager", function(s)
-            s.states = {{id = playerState}}
-            s.is_sitting = true
-            return s
-        end)
-
-        pet.model:ScaleTo(2)
-
-        MountTrack =
-            Player.Character.Humanoid.Animator:LoadAnimation(
-                AnimationManager.get_track("PlayerRidingPet")
-            )
-        Player.Character.Humanoid.Sit = true
-        MountTrack:Play()
-    end
-
-    -- =========================
-    -- ROUTER HOOK
-    -- =========================
-
-    local oldGet = RouterClient.get
-    RouterClient.get = function(name)
-        return oldGet(name)
-    end
-
-    -- =========================
-    -- INVENTORY DB
-    -- =========================
-
-    local InventoryDB = load("InventoryDB")
-
     function GetPetByName(name)
         for _, v in pairs(InventoryDB.pets) do
             if v.name:lower() == name:lower() then
@@ -195,78 +90,204 @@ task.spawn(function()
         return nil
     end
 
-    -- =========================
-    -- YOUR GUI (UNCHANGED)
-    -- =========================
-
-    local WindUI = loadstring(game:HttpGet(
-        "https://github.com/Footagesus/WindUI/releases/latest/download/main.lua"
-    ))()
-
-    local Confirmed = false
-
-    WindUI:Popup({
-        Title = "SNTHNOVA HUB",
-        Buttons = {
-            {Title = "Cancel"},
-            {Title = "Continue", Callback = function() Confirmed = true end}
-        }
-    })
-
-    repeat task.wait() until Confirmed
-
-    local Window = WindUI:CreateWindow({
-        Title = "SNTHNOVA HUB",
-        Size = UDim2.fromOffset(420, 350),
-        Theme = "Dark"
-    })
-
-    local PetsTab = Window:Tab({
-        Title = "Pets",
-        Icon = "heart"
-    })
-
-    local PetName = ""
-    local PetType = "FR"
-
-    PetsTab:Input({
-        Title = "Pet Name",
-        Placeholder = "Frost Dragon",
-        Callback = function(v)
-            PetName = v
-        end
-    })
-
-    PetsTab:Dropdown({
-        Title = "Pet Type",
-        Values = {"FR", "F", "R", "N"},
-        Callback = function(v)
-            PetType = v
-        end
-    })
-
-    PetsTab:Button({
-        Title = "Spawn Pet",
-        Callback = function()
-            local id = GetPetByName(PetName)
-            if not id then return end
-
-            local props = {
-                flyable = PetType == "FR" or PetType == "F",
-                rideable = PetType == "FR" or PetType == "R",
-                neon = PetType == "N"
-            }
-
-            local uid = CreatePet(id, props)
-            local pet = SpawnedPets[uid]
-            EquipPet(pet)
-
-            if props.flyable then
-                MountPet(uid, "PlayerFlyingPet", "PetBeingFlown")
-            elseif props.rideable then
-                MountPet(uid, "PlayerRidingPet", "PetBeingRidden")
+    function GetToyByName(name)
+        for _, v in pairs(InventoryDB.toys) do
+            if v.name:lower() == name:lower() then
+                return v.id
             end
         end
-    })
+        return nil
+    end
+
+    -- =========================
+    -- TOY SPAWN
+    -- =========================
+    local function SpawnToy(id)
+        UpdateData("inventory", function(inv)
+            local toys = table.clone(inv.toys)
+            toys[UID()] = {
+                id = id,
+                category = "toys"
+            }
+            inv.toys = toys
+            return inv
+        end)
+    end
+
+    -- =========================
+    -- GUI
+    -- =========================
+    local Gui = Instance.new("ScreenGui")
+    Gui.Name = "SNTHNOVA_HUB"
+    Gui.Parent = Player:WaitForChild("PlayerGui")
+
+    local Main = Instance.new("Frame", Gui)
+    Main.Size = UDim2.fromOffset(420, 420)
+    Main.Position = UDim2.fromScale(0.5, 0.5)
+    Main.AnchorPoint = Vector2.new(0.5, 0.5)
+    Main.BackgroundColor3 = Color3.fromRGB(25,25,25)
+    Instance.new("UICorner", Main).CornerRadius = UDim.new(0, 12)
+
+    local Title = Instance.new("TextLabel", Main)
+    Title.Size = UDim2.new(1, -20, 0, 40)
+    Title.Position = UDim2.fromOffset(10, 10)
+    Title.Text = "SNTHNOVA HUB"
+    Title.TextColor3 = Color3.new(1,1,1)
+    Title.Font = Enum.Font.GothamBold
+    Title.TextSize = 20
+    Title.BackgroundTransparency = 1
+    Title.TextXAlignment = Left
+
+    -- =========================
+    -- PET SECTION
+    -- =========================
+    local PetBox = Instance.new("TextBox", Main)
+    PetBox.Size = UDim2.new(1, -40, 0, 36)
+    PetBox.Position = UDim2.fromOffset(20, 60)
+    PetBox.PlaceholderText = "Pet Name (e.g. Frost Dragon)"
+    PetBox.Text = ""
+    PetBox.BackgroundColor3 = Color3.fromRGB(35,35,35)
+    PetBox.TextColor3 = Color3.new(1,1,1)
+    Instance.new("UICorner", PetBox).CornerRadius = UDim.new(0,8)
+
+    -- =========================
+    -- PET MODE (OLD STYLE)
+    -- =========================
+    local PetMode = "NORMAL"
+    local ModeButtons = {}
+
+    local function SetMode(mode)
+        PetMode = mode
+        for m,b in pairs(ModeButtons) do
+            b.BackgroundColor3 =
+                (m == mode)
+                and Color3.fromRGB(0,170,100)
+                or Color3.fromRGB(50,50,50)
+        end
+    end
+
+    local function ModeBtn(text, mode, x)
+        local b = Instance.new("TextButton", Main)
+        b.Size = UDim2.fromOffset(90,32)
+        b.Position = UDim2.fromOffset(x, 110)
+        b.Text = text
+        b.Font = Enum.Font.GothamBold
+        b.TextSize = 14
+        b.TextColor3 = Color3.new(1,1,1)
+        b.BackgroundColor3 = Color3.fromRGB(50,50,50)
+        Instance.new("UICorner", b).CornerRadius = UDim.new(0,8)
+
+        b.MouseButton1Click:Connect(function()
+            SetMode(mode)
+        end)
+
+        ModeButtons[mode] = b
+    end
+
+    ModeBtn("FR",  "FR",  20)
+    ModeBtn("NFR", "NFR", 130)
+    ModeBtn("MFR", "MFR", 240)
+
+    -- =========================
+    -- SPAWN PET
+    -- =========================
+    local function BuildProps()
+        local p = { age = math.random(1,900000) }
+
+        if PetMode == "FR" then
+            p.flyable = true
+            p.rideable = true
+        elseif PetMode == "NFR" then
+            p.flyable = true
+            p.rideable = true
+            p.neon = true
+        elseif PetMode == "MFR" then
+            p.flyable = true
+            p.rideable = true
+            p.mega_neon = true
+        end
+
+        return p
+    end
+
+    local SpawnPet = Instance.new("TextButton", Main)
+    SpawnPet.Size = UDim2.new(1, -40, 0, 40)
+    SpawnPet.Position = UDim2.fromOffset(20, 160)
+    SpawnPet.Text = "Spawn Pet"
+    SpawnPet.Font = Enum.Font.GothamBold
+    SpawnPet.TextSize = 16
+    SpawnPet.TextColor3 = Color3.new(1,1,1)
+    SpawnPet.BackgroundColor3 = Color3.fromRGB(80,80,200)
+    Instance.new("UICorner", SpawnPet).CornerRadius = UDim.new(0,10)
+
+    SpawnPet.MouseButton1Click:Connect(function()
+        local id = GetPetByName(PetBox.Text)
+        if id then
+            vu83(id, BuildProps())
+        end
+    end)
+
+    local SpawnAllPets = Instance.new("TextButton", Main)
+    SpawnAllPets.Size = UDim2.new(1, -40, 0, 40)
+    SpawnAllPets.Position = UDim2.fromOffset(20, 210)
+    SpawnAllPets.Text = "Spawn ALL Pets"
+    SpawnAllPets.Font = Enum.Font.GothamBold
+    SpawnAllPets.TextSize = 16
+    SpawnAllPets.TextColor3 = Color3.new(1,1,1)
+    SpawnAllPets.BackgroundColor3 = Color3.fromRGB(200,80,80)
+    Instance.new("UICorner", SpawnAllPets).CornerRadius = UDim.new(0,10)
+
+    SpawnAllPets.MouseButton1Click:Connect(function()
+        for _, pet in pairs(InventoryDB.pets) do
+            vu83(pet.id, BuildProps())
+            task.wait(0.05)
+        end
+    end)
+
+    -- =========================
+    -- TOYS SECTION
+    -- =========================
+    local ToyBox = Instance.new("TextBox", Main)
+    ToyBox.Size = UDim2.new(1, -40, 0, 36)
+    ToyBox.Position = UDim2.fromOffset(20, 270)
+    ToyBox.PlaceholderText = "Toy Name (e.g. Grappling Hook)"
+    ToyBox.Text = ""
+    ToyBox.BackgroundColor3 = Color3.fromRGB(35,35,35)
+    ToyBox.TextColor3 = Color3.new(1,1,1)
+    Instance.new("UICorner", ToyBox).CornerRadius = UDim.new(0,8)
+
+    local SpawnToyBtn = Instance.new("TextButton", Main)
+    SpawnToyBtn.Size = UDim2.new(1, -40, 0, 40)
+    SpawnToyBtn.Position = UDim2.fromOffset(20, 320)
+    SpawnToyBtn.Text = "Spawn Toy"
+    SpawnToyBtn.Font = Enum.Font.GothamBold
+    SpawnToyBtn.TextSize = 16
+    SpawnToyBtn.TextColor3 = Color3.new(1,1,1)
+    SpawnToyBtn.BackgroundColor3 = Color3.fromRGB(80,120,200)
+    Instance.new("UICorner", SpawnToyBtn).CornerRadius = UDim.new(0,10)
+
+    SpawnToyBtn.MouseButton1Click:Connect(function()
+        local id = GetToyByName(ToyBox.Text)
+        if id then
+            SpawnToy(id)
+        end
+    end)
+
+    local SpawnAllToys = Instance.new("TextButton", Main)
+    SpawnAllToys.Size = UDim2.new(1, -40, 0, 40)
+    SpawnAllToys.Position = UDim2.fromOffset(20, 370)
+    SpawnAllToys.Text = "Spawn ALL Toys"
+    SpawnAllToys.Font = Enum.Font.GothamBold
+    SpawnAllToys.TextSize = 16
+    SpawnAllToys.TextColor3 = Color3.new(1,1,1)
+    SpawnAllToys.BackgroundColor3 = Color3.fromRGB(160,100,60)
+    Instance.new("UICorner", SpawnAllToys).CornerRadius = UDim.new(0,10)
+
+    SpawnAllToys.MouseButton1Click:Connect(function()
+        for _, toy in pairs(InventoryDB.toys) do
+            SpawnToy(toy.id)
+            task.wait(0.03)
+        end
+    end)
 
 end)
